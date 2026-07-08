@@ -1,0 +1,26 @@
+{
+  "name": "petshop-scraper",
+  "version": "1.0.0",
+  "description": "Parser for petshop.ru",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "test": "ts-node src/test-petshop.ts",
+    "debug": "ts-node src/debug-petshop.ts"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "cheerio": "^1.2.0",
+    "fs-extra": "^11.3.6",
+    "puppeteer": "^21.11.0"
+  },
+  "devDependencies": {
+    "@types/cheerio": "^0.22.35",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.19.43",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.0"
+  }
+}
