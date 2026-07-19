@@ -60,3 +60,6 @@ cd ../gstriol-scraper && npm start
 
 # Парсер westernpets.ru
 cd ../westernpets-scraper && npm start
+
+# Парсер zooman.ru
+cd ../zooman-scraper && npm start
