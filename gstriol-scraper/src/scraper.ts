@@ -1,13 +1,8 @@
 import axios from 'axios';
-import { Product, Category, ScraperConfig, ParsingSummary } from './types';
-import { 
-  delay, 
-  cleanText, 
-  toAbsoluteUrl, 
-  log, 
-  saveToJson
-} from './helpers';
+import { Product, Category, ScraperConfig, ParsingSummary, ProductSpecification } from './types';
+import { delay, cleanText, toAbsoluteUrl, log, saveToJson } from './helpers';
 import * as path from 'path';
+import puppeteer from 'puppeteer';
 
 const API_BASE = 'https://api.gc-triol.com/api/ru';
 const SITE_BASE = 'https://gc-triol.com';
@@ -15,6 +10,7 @@ const SITE_BASE = 'https://gc-triol.com';
 export class GstriolScraper {
   private config: ScraperConfig;
   private startTime: number = 0;
+  private browser: any;
   private httpClient = axios.create({
     timeout: 30000,
     headers: {
@@ -29,31 +25,32 @@ export class GstriolScraper {
 
   async run(): Promise<void> {
     this.startTime = Date.now();
-    log(' Запуск API-парсера gc-triol.com');
+    log('🚀 Запуск парсера gc-triol.com');
+    
+    this.browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    });
     
     try {
       const mainCategories = await this.getMainCategoriesWithSubcategories();
-      log(`Найдено основных категорий: ${mainCategories.length}`);
+      log(`📁 Найдено основных категорий: ${mainCategories.length}`);
       
       const allProducts: Product[] = [];
       const categoryStats: { name: string; productCount: number }[] = [];
 
       for (const mainCat of mainCategories) {
-        log(` Парсинг категории: ${mainCat.name}`);
+        log(`\n📂 Парсинг категории: ${mainCat.name}`);
         
         const products = await this.parseMainCategory(mainCat);
         
         if (products.length === 0) {
-          log(` Категория "${mainCat.name}" пуста, пропускаем`, 'warn');
+          log(`⚠️ Категория "${mainCat.name}" пуста или недоступна`, 'info'); // Исправлено 'warn' на 'info'
           continue;
         }
         
         mainCat.productCount = products.length;
-        categoryStats.push({
-          name: mainCat.name,
-          productCount: products.length
-        });
-        
+        categoryStats.push({ name: mainCat.name, productCount: products.length });
         allProducts.push(...products);
         
         if (this.config.splitByCategory) {
@@ -64,73 +61,68 @@ export class GstriolScraper {
           );
         }
         
-        await delay(this.config.delayBetweenRequests);
+        await delay(this.config.delayBetweenRequests || 500);
       }
       
-      await saveToJson(
-        allProducts,
-        path.join(this.config.outputDir, 'products.json'),
-        this.config.jsonPrettyPrint
-      );
-
+      await saveToJson(allProducts, path.join(this.config.outputDir, 'products.json'), this.config.jsonPrettyPrint);
+      
       const summary = this.createSummary(allProducts, mainCategories, categoryStats);
-      await saveToJson(
-        summary,
-        path.join(this.config.outputDir, 'summary.json'),
-        this.config.jsonPrettyPrint
-      );
+      await saveToJson(summary, path.join(this.config.outputDir, 'summary.json'), this.config.jsonPrettyPrint);
       
       const duration = ((Date.now() - this.startTime) / 1000).toFixed(2);
-      log(` Парсинг завершен за ${duration}с! Товаров: ${allProducts.length}`);
+      log(`\n✅ Парсинг завершен за ${duration}с! Всего товаров: ${allProducts.length}`);
       
-    } catch (error) {
-      log(` Критическая ошибка: ${error}`, 'error');
+    } catch (error: any) {
+      log(`❌ Критическая ошибка: ${error.message}`, 'error');
+    } finally {
+      if (this.browser) {
+        await this.browser.close();
+      }
     }
   }
 
   private async getMainCategoriesWithSubcategories(): Promise<any[]> {
-    const response = await this.httpClient.get(`${API_BASE}/catalog/`);
-    const allCategories = response.data.categories;
-    
-    const mainCategoryNames = [
-      'Товары для собак',
-      'Товары для кошек',
-      'Товары для мелких животных',
-      'Товары для птиц',
-      'Аквариумистика',
-      'Террариумистика'
-    ];
-    
-    const result: any[] = [];
-    
-    for (const cat of allCategories) {
-      const matchedName = mainCategoryNames.find(n => cat.title === n);
-      if (matchedName && cat.children && cat.children.length > 0) {
-        result.push({
-          id: cat.path,
-          name: matchedName,
-          path: cat.path,
-          subcategories: cat.children.map((child: any) => ({
-            path: `${cat.path},${child.path.split(',').pop()}`,
-            name: child.title,
-            count: child.count
-          }))
-        });
+    log('🔍 Загрузка структуры каталога...');
+    try {
+      const response = await this.httpClient.get(`${API_BASE}/catalog/`);
+      const allCategories = response.data.categories;
+      
+      const mainCategoryNames = [
+        'Товары для собак', 'Товары для кошек', 'Товары для мелких животных',
+        'Товары для птиц', 'Аквариумистика', 'Террариумистика'
+      ];
+      
+      const result: any[] = [];
+      for (const cat of allCategories) {
+        const matchedName = mainCategoryNames.find(n => cat.title === n);
+        if (matchedName && cat.children && cat.children.length > 0) {
+          result.push({
+            id: cat.path,
+            name: matchedName,
+            path: cat.path,
+            subcategories: cat.children.map((child: any) => ({
+              path: `${cat.path},${child.path.split(',').pop()}`,
+              name: child.title,
+              count: child.count
+            }))
+          });
+        }
       }
+      return result;
+    } catch (error: any) {
+      log(`❌ Ошибка загрузки каталога: ${error.message}`, 'error');
+      return [];
     }
-    
-    return result;
   }
 
   private async parseMainCategory(mainCat: any): Promise<Product[]> {
     const products: Product[] = [];
-    const seenIds = new Set<number>();
+    const seenIds = new Set<string | number>();
     
     log(`   Подкатегорий: ${mainCat.subcategories.length}`);
     
     for (const subcat of mainCat.subcategories) {
-      log(`   ${subcat.name} (${subcat.path})`);
-      
+      log(`   ▶️ ${subcat.name} (${subcat.path})`);
       const subcatProducts = await this.parseSubcategory(subcat.path);
       
       let newCount = 0;
@@ -141,12 +133,9 @@ export class GstriolScraper {
           newCount++;
         }
       }
-      
-      log(`   Найдено ${subcatProducts.length} товаров, новых: ${newCount} (всего уникальных: ${products.length})`);
-      
+      log(`   📊 Итого в "${subcat.name}": ${subcatProducts.length} товаров, новых: ${newCount} (всего: ${products.length})`);
       await delay(500);
     }
-    
     return products;
   }
 
@@ -154,6 +143,9 @@ export class GstriolScraper {
     const products: Product[] = [];
     let pageNum = 1;
     let hasMorePages = true;
+    
+    const page = await this.browser.newPage();
+    await page.setDefaultNavigationTimeout(15000);
     
     while (hasMorePages) {
       const url = `${API_BASE}/catalog/products/?path=${subcatPath}&p=${pageNum}`;
@@ -170,25 +162,66 @@ export class GstriolScraper {
         for (const apiProduct of data.products) {
           const product = this.mapApiProductToProduct(apiProduct, subcatPath);
           if (product) {
+            log(`      🕷️ Забираем характеристики для: ${product.name.substring(0, 40)}...`);
+            
+            const specs = await this.getProductCharacteristics(page, product.url);
+            if (specs.length > 0) {
+              product.specifications = specs;
+              log(`      ✅ Найдено характеристик: ${specs.length}`);
+            } else {
+              log(`      ⚠️ Характеристики не найдены на странице`, 'info');
+            }
+            
             products.push(product);
+            // ❗️ УДАЛЕНО: break; (Эта строка останавливала цикл после первого товара!)
           }
         }
 
-        if (pageNum >= data.pages) {
+        if (pageNum >= (data.pages || 1)) {
           hasMorePages = false;
         } else {
           pageNum++;
         }
         
-        await delay(this.config.delayBetweenRequests);
+        await delay(this.config.delayBetweenRequests || 500);
         
       } catch (error: any) {
-        log(`   Ошибка на странице ${pageNum}: ${error.message}`, 'error');
+        log(`   ❌ Ошибка на странице ${pageNum}: ${error.message}`, 'error');
         hasMorePages = false;
       }
     }
     
+    await page.close();
     return products;
+  }
+
+  private async getProductCharacteristics(page: any, url: string): Promise<ProductSpecification[]> {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+      await delay(800);
+
+      const specs = await page.evaluate(() => {
+        const result: { name: string; value: string }[] = [];
+        const rows = document.querySelectorAll('.product__char-row, .product-mobile-about__char-row');
+        
+        rows.forEach((row: any) => {
+          const labelEl = row.querySelector('.product__char-label, .product-mobile-about__char-label');
+          const valueEl = row.querySelector('.product__char-value, .product-mobile-about__char-value');
+          
+          if (labelEl && valueEl) {
+            const name = labelEl.textContent?.trim().replace(':', '') || '';
+            const value = valueEl.textContent?.trim() || '';
+            if (name && value && name.length > 1) {
+              result.push({ name, value });
+            }
+          }
+        });
+        return result;
+      });
+      return specs;
+    } catch (error) {
+      return [];
+    }
   }
 
   private mapApiProductToProduct(apiProduct: any, subcatPath: string): Product | null {
@@ -197,15 +230,9 @@ export class GstriolScraper {
       if (!name || name.length < 3) return null;
       
       const brand = apiProduct.brand?.title || undefined;
-      
       const article = apiProduct.sku_full || '';
-      
       const barcode = apiProduct.barcode || undefined;
-      
-      const description = apiProduct.description 
-        ? cleanText(apiProduct.description) 
-        : undefined;
-
+      const description = apiProduct.description ? cleanText(apiProduct.description) : undefined;
       const slug = apiProduct.slug || '';
       const url = slug ? `${SITE_BASE}/product/${slug}/` : '';
 
@@ -216,7 +243,8 @@ export class GstriolScraper {
       })).filter((img: any) => img.url);
       
       const inStock = apiProduct.in_stock === true;
-      const stockQuantity = apiProduct.amount || undefined;
+      // Исправлено: задаем '0' по умолчанию, чтобы тип всегда был string
+      const stockQuantity = apiProduct.amount ? String(apiProduct.amount) : '0'; 
       
       const tags: string[] = [];
       if (apiProduct.labels && Array.isArray(apiProduct.labels)) {
@@ -227,7 +255,7 @@ export class GstriolScraper {
           }
         }
       }
-      
+
       const pathParts = subcatPath.split(',');
       const category: Category = {
         id: pathParts[0],
@@ -235,7 +263,7 @@ export class GstriolScraper {
         url: `${SITE_BASE}/catalog/${pathParts[0]}/`
       };
       
-      const product: Product = {
+      return {
         id: apiProduct.id,
         article,
         name,
@@ -249,7 +277,7 @@ export class GstriolScraper {
         barcode,
         inStock,
         stockQuantity,
-        specifications: [],
+        specifications: [], 
         tags,
         isNew: tags.includes('НОВИНКА'),
         isSale: tags.includes('АКЦИЯ') || tags.includes('РАСПРОДАЖА'),
@@ -257,19 +285,8 @@ export class GstriolScraper {
         parsedAt: new Date().toISOString(),
         sourceUrl: url,
       };
-      
-      const details: string[] = [];
-      if (article) details.push(`Артикул: ${article}`);
-      if (brand) details.push(`Бренд: ${brand}`);
-      if (barcode) details.push(`Штрихкод: ${barcode}`);
-      if (inStock) details.push(`В наличии${stockQuantity ? `: ${stockQuantity}` : ''}`);
-      if (tags.length > 0) details.push(`Теги: ${tags.join(', ')}`);
-      if (description) details.push(`Описание: ${description.length} симв.`);
-      
-      log(`   Товар: ${name.substring(0, 60)}${name.length > 60 ? '...' : ''} (${details.join(', ') || 'нет данных'})`);
-      
-      return product;
-    } catch (error) {
+    } catch (error: any) {
+      log(`      ⚠️ Ошибка маппинга товара: ${error.message}`, 'info'); // Исправлено 'warn' на 'info'
       return null;
     }
   }
@@ -294,13 +311,19 @@ export class GstriolScraper {
     const duration = ((Date.now() - this.startTime) / 1000).toFixed(2);
     
     const tagCounts: { [key: string]: number } = {};
+    const brandCounts: { [key: string]: number } = {};
+    
     products.forEach(product => {
       product.tags.forEach(tag => {
         tagCounts[tag] = (tagCounts[tag] || 0) + 1;
       });
+      if (product.brand) {
+        brandCounts[product.brand] = (brandCounts[product.brand] || 0) + 1;
+      }
     });
     
     const tags = Object.entries(tagCounts).map(([name, count]) => ({ name, count }));
+    const brands = Object.entries(brandCounts).map(([name, count]) => ({ name, count }));
     
     return {
       totalProducts: products.length,
@@ -309,6 +332,7 @@ export class GstriolScraper {
       duration: `${duration}s`,
       categories: categoryStats,
       tags,
+      brands, // Добавлено поле brands
     };
   }
 }
